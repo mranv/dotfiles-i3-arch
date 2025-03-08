@@ -1,6 +1,6 @@
 #!/bin/bash
-# Enhanced setup script with paru fallback and security-focused additions
-set -e
+# Enhanced setup script with paru fallback and audio system detection
+# Remove "set -e" to prevent script from stopping on errors
 
 # Colors
 RED='\033[0;31m'
@@ -54,45 +54,94 @@ ensure_paru() {
   fi
 }
 
+# Function to check if package is installed
+is_package_installed() {
+  pacman -Qi "$1" &>/dev/null
+}
+
+# Function to install individual package using pacman with paru fallback
+install_single_package() {
+  local pkg="$1"
+  
+  # Skip if already installed
+  if is_package_installed "$pkg"; then
+    print_status "$pkg is already installed"
+    return 0
+  fi
+  
+  print_status "Installing $pkg..."
+  if sudo pacman -S --needed --noconfirm "$pkg"; then
+    print_status "Installed $pkg successfully"
+    return 0
+  else
+    # Try with paru
+    print_warning "Pacman failed to install $pkg, trying with paru..."
+    ensure_paru
+    if paru -S --needed --noconfirm "$pkg"; then
+      print_status "Installed $pkg with paru successfully"
+      return 0
+    else
+      print_error "Failed to install $pkg with both pacman and paru"
+      return 1
+    fi
+  fi
+}
+
 # Function to install packages using pacman with paru fallback
 install_pacman() {
-  print_status "Installing packages with pacman..."
-  if sudo pacman -Syu --needed --noconfirm "$@"; then
-    print_status "Pacman installation successful"
-  else
-    print_warning "Pacman installation failed, trying with paru..."
-    ensure_paru
-    paru -S --needed --noconfirm "$@" || {
-      print_error "Failed to install packages with both pacman and paru"
-      return 1
-    }
-    print_status "Paru installation successful"
+  local packages=("$@")
+  local failed_packages=()
+  
+  # Install each package individually to avoid stopping on conflicts
+  for pkg in "${packages[@]}"; do
+    install_single_package "$pkg" || failed_packages+=("$pkg")
+  done
+  
+  if [ ${#failed_packages[@]} -gt 0 ]; then
+    print_warning "The following packages failed to install: ${failed_packages[*]}"
   fi
+  
+  # Always return success to continue script
+  return 0
 }
 
 # Function to install packages from AUR using paru (preferred) or yay
 install_aur() {
-  # Try paru first, fall back to yay if paru isn't available
+  local packages=("$@")
+  local failed_packages=()
+  
+  # Choose AUR helper
   if command_exists paru; then
-    print_status "Installing AUR packages with paru..."
-    paru -S --needed --noconfirm "$@" || {
-      print_error "Failed to install AUR packages with paru"
-      return 1
-    }
+    local aur_helper="paru"
   elif command_exists yay; then
-    print_status "Installing AUR packages with yay..."
-    yay -S --needed --noconfirm "$@" || {
-      print_error "Failed to install AUR packages with yay"
-      return 1
-    }
+    local aur_helper="yay"
   else
-    # Install paru and try again
     ensure_paru
-    paru -S --needed --noconfirm "$@" || {
-      print_error "Failed to install AUR packages with paru"
-      return 1
-    }
+    local aur_helper="paru"
   fi
+  
+  # Install each package individually
+  for pkg in "${packages[@]}"; do
+    if is_package_installed "$pkg"; then
+      print_status "$pkg is already installed"
+      continue
+    fi
+    
+    print_status "Installing AUR package $pkg with $aur_helper..."
+    if $aur_helper -S --needed --noconfirm "$pkg"; then
+      print_status "Installed $pkg successfully"
+    else
+      print_error "Failed to install $pkg"
+      failed_packages+=("$pkg")
+    fi
+  done
+  
+  if [ ${#failed_packages[@]} -gt 0 ]; then
+    print_warning "The following AUR packages failed to install: ${failed_packages[*]}"
+  fi
+  
+  # Always return success to continue script
+  return 0
 }
 
 # Check if system is Arch Linux
@@ -181,13 +230,33 @@ else
   print_warning "Hyprland not found in repositories. Skipping Hyprland installation."
 fi
 
-# System utilities
+# System utilities with audio system detection
 print_section "Installing system utilities"
-install_pacman \
-  brightnessctl \
-  network-manager-applet \
-  pulseaudio \
-  pavucontrol
+
+# Check if PipeWire is installed
+if is_package_installed "pipewire-pulse"; then
+  print_status "Detected PipeWire audio system, skipping PulseAudio installation"
+  
+  # Install non-conflicting packages
+  install_pacman \
+    brightnessctl \
+    network-manager-applet \
+    pavucontrol
+  
+  # Optionally install additional PipeWire-related packages
+  install_pacman \
+    pipewire-alsa \
+    pipewire-jack \
+    wireplumber
+else
+  # Try to install PulseAudio
+  print_status "No PipeWire detected, attempting to install PulseAudio"
+  install_pacman \
+    brightnessctl \
+    network-manager-applet \
+    pavucontrol \
+    pulseaudio
+fi
 
 # Fonts and themes
 print_section "Installing fonts and themes"
@@ -210,15 +279,15 @@ fi
 
 # Configure basic security
 print_section "Setting up basic security"
-sudo systemctl enable ufw.service
-sudo ufw default deny incoming
-sudo ufw default allow outgoing
-sudo ufw allow ssh
-sudo ufw enable || print_warning "Failed to enable UFW firewall"
+sudo systemctl enable ufw.service 2>/dev/null || print_warning "Failed to enable UFW service"
+sudo ufw default deny incoming 2>/dev/null || print_warning "Failed to set UFW default deny incoming"
+sudo ufw default allow outgoing 2>/dev/null || print_warning "Failed to set UFW default allow outgoing"
+sudo ufw allow ssh 2>/dev/null || print_warning "Failed to allow SSH in UFW"
+sudo ufw enable 2>/dev/null || print_warning "Failed to enable UFW firewall"
 
 # Configure fail2ban
 if command_exists fail2ban-client; then
-  sudo systemctl enable fail2ban.service
+  sudo systemctl enable fail2ban.service 2>/dev/null || print_warning "Failed to enable fail2ban service"
   print_status "Enabled fail2ban service"
 fi
 
@@ -226,6 +295,6 @@ fi
 print_warning "Note: Ghostty is a proprietary terminal and must be installed manually from https://ghostty.org/"
 
 print_section "Installation complete! Please run ./setup.sh to configure your environment"
-chmod +x "$PWD/setup.sh"
+chmod +x "$PWD/setup.sh" 2>/dev/null || print_warning "Could not set executable bit on setup.sh"
 
 print_warning "Remember to customize your security configurations in /etc/fail2ban and check system with arch-audit"
